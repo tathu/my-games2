@@ -2,6 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>フリーキック対決</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -14,12 +15,17 @@
       min-height: 100vh;
       font-family: 'Segoe UI', Arial, sans-serif;
       user-select: none;
+      overflow-x: hidden;
     }
     canvas {
       display: block;
       cursor: crosshair;
       border-radius: 12px;
       box-shadow: 0 0 40px rgba(0, 150, 255, 0.25);
+      width: min(800px, 100vw);
+      aspect-ratio: 800 / 520;
+      height: auto;
+      touch-action: none;
     }
   </style>
 </head>
@@ -1073,6 +1079,53 @@ canvas.addEventListener('mouseup', () => {
   if (state === 'aiming') shoot(mx, my);
   power = 0;
 });
+
+// ── Touch events (smartphone support) ──────────────────────
+function getTouchPos(e) {
+  const touch = e.touches[0] || e.changedTouches[0];
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (touch.clientX - r.left) * (W / r.width),
+    y: (touch.clientY - r.top)  * (H / r.height)
+  };
+}
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const pos = getTouchPos(e);
+  mx = pos.x; my = pos.y;
+}, { passive: false });
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const pos = getTouchPos(e);
+  mx = pos.x; my = pos.y;
+
+  const ac = getAudio();
+  if (ac && ac.state === 'suspended') ac.resume();
+
+  if (state === 'intro' || state === 'gameover') { startGame(); return; }
+  if (state === 'foul') { foulAnim = null; state = 'aiming'; return; }
+
+  if (state !== 'intro' && state !== 'gameover') {
+    if (mx >= W - 172 && mx <= W - 15 && my >= 15 && my <= 45) {
+      startGame(); return;
+    }
+  }
+
+  if (state !== 'aiming') return;
+  charging = true;
+  chargeStart = performance.now();
+  power = 0;
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (!charging) return;
+  charging = false;
+  if (state === 'aiming') shoot(mx, my);
+  power = 0;
+}, { passive: false });
 
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 

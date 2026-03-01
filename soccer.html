@@ -16,6 +16,7 @@
       align-items: center;
       justify-content: center;
       user-select: none;
+      overflow-x: hidden;
     }
 
     h1 {
@@ -45,6 +46,7 @@
     .game {
       position: relative;
       width: 740px; height: 480px;
+      transform-origin: top center;
       background: linear-gradient(180deg, #15803d 0%, #22c55e 50%, #15803d 100%);
       border-radius: 12px;
       overflow: hidden;
@@ -639,6 +641,16 @@
     setSub('');
     $('replay-btn').style.display = 'inline-block';
   }
+
+  // ── レスポンシブスケーリング ─────────────────────────
+  function scaleGameUI() {
+    const game = document.querySelector('.game');
+    const scale = Math.min(1, (window.innerWidth - 16) / 740);
+    game.style.transform = `scale(${scale})`;
+    game.style.marginBottom = `-${480 * (1 - scale)}px`;
+  }
+  scaleGameUI();
+  window.addEventListener('resize', scaleGameUI);
 
   buildZones();
   startGame();
