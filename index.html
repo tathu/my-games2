@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>サッカーゲームコレクション</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0d1117;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      color: white;
+      overflow: hidden;
+    }
+
+    /* ── 背景フィールド ── */
+    .field-bg {
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse at 50% 110%, #1a5c1a 0%, transparent 65%),
+        linear-gradient(180deg, #050d1f 0%, #0d2a55 55%, #0a1c10 100%);
+      z-index: 0;
+    }
+    .field-lines {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      overflow: hidden;
+    }
+    .field-lines::before {
+      content: '';
+      position: absolute;
+      left: 50%;
+      bottom: -60px;
+      transform: translateX(-50%);
+      width: 340px;
+      height: 140px;
+      border: 2px solid rgba(255,255,255,0.12);
+      border-radius: 50%;
+    }
+    .field-lines::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      bottom: 0;
+      transform: translateX(-50%);
+      width: 2px;
+      height: 45%;
+      background: rgba(255,255,255,0.07);
+    }
+
+    /* ── コンテンツ ── */
+    .container {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 40px;
+      padding: 20px;
+    }
+
+    /* ── タイトル ── */
+    .title-wrap {
+      text-align: center;
+    }
+    .title-wrap .ball {
+      font-size: 52px;
+      line-height: 1;
+      filter: drop-shadow(0 0 18px rgba(255,215,0,0.5));
+    }
+    .title-wrap h1 {
+      font-size: 38px;
+      font-weight: 900;
+      letter-spacing: 2px;
+      background: linear-gradient(135deg, #ffd700, #ffaa00);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      text-shadow: none;
+      filter: drop-shadow(0 2px 8px rgba(255,180,0,0.35));
+      margin-top: 6px;
+    }
+    .title-wrap p {
+      margin-top: 10px;
+      color: rgba(255,255,255,0.5);
+      font-size: 15px;
+      letter-spacing: 1px;
+    }
+
+    /* ── ゲームカード ── */
+    .cards {
+      display: flex;
+      gap: 28px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .card {
+      display: block;
+      text-decoration: none;
+      color: white;
+      width: 270px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 20px;
+      padding: 32px 24px 28px;
+      text-align: center;
+      transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+      cursor: pointer;
+    }
+    .card:hover {
+      transform: translateY(-6px) scale(1.02);
+      border-color: rgba(255,255,255,0.35);
+    }
+    .card.pk:hover  { box-shadow: 0 16px 48px rgba(0,180,255,0.25); }
+    .card.fk:hover  { box-shadow: 0 16px 48px rgba(255,150,0,0.25); }
+
+    .card-icon {
+      font-size: 56px;
+      line-height: 1;
+      margin-bottom: 16px;
+    }
+    .card h2 {
+      font-size: 22px;
+      font-weight: 800;
+      margin-bottom: 10px;
+      letter-spacing: 1px;
+    }
+    .card.pk h2 { color: #4fc3f7; }
+    .card.fk h2 { color: #ffb74d; }
+
+    .card p {
+      font-size: 13px;
+      line-height: 1.7;
+      color: rgba(255,255,255,0.55);
+      margin-bottom: 22px;
+    }
+
+    .card-btn {
+      display: inline-block;
+      padding: 10px 28px;
+      border-radius: 50px;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      transition: opacity 0.15s;
+    }
+    .card:hover .card-btn { opacity: 0.85; }
+    .card.pk .card-btn {
+      background: linear-gradient(135deg, #0288d1, #01579b);
+      box-shadow: 0 4px 14px rgba(2,136,209,0.4);
+    }
+    .card.fk .card-btn {
+      background: linear-gradient(135deg, #f57c00, #e65100);
+      box-shadow: 0 4px 14px rgba(245,124,0,0.4);
+    }
+
+    /* ── フッター ── */
+    footer {
+      position: relative;
+      z-index: 1;
+      margin-top: 8px;
+      color: rgba(255,255,255,0.2);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="field-bg"></div>
+<div class="field-lines"></div>
+
+<div class="container">
+
+  <div class="title-wrap">
+    <div class="ball">⚽</div>
+    <h1>サッカーゲームコレクション</h1>
+    <p>ゲームを選んでプレイしよう！</p>
+  </div>
+
+  <div class="cards">
+
+    <a class="card pk" href="soccer.html">
+      <div class="card-icon">🥅</div>
+      <h2>PK シュート</h2>
+      <p>ゴールキーパーに勝負を挑め！<br>狙いを定めてシュートを決めよう。</p>
+      <span class="card-btn">プレイする</span>
+    </a>
+
+    <a class="card fk" href="freekick.html">
+      <div class="card-icon">🟥</div>
+      <h2>フリーキック対決</h2>
+      <p>人壁を越えてゴールを狙え！<br>5本のFKで何点取れるか挑戦。</p>
+      <span class="card-btn">プレイする</span>
+    </a>
+
+  </div>
+
+</div>
+
+<footer>⚽ Soccer Game Collection</footer>
+
+</body>
+</html>

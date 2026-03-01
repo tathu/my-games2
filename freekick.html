@@ -1,0 +1,1082 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>フリーキック対決</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0d1117;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      user-select: none;
+    }
+    canvas {
+      display: block;
+      cursor: crosshair;
+      border-radius: 12px;
+      box-shadow: 0 0 40px rgba(0, 150, 255, 0.25);
+    }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = 800, H = 520;
+canvas.width = W; canvas.height = H;
+
+// ── Constants ──────────────────────────────────────────────
+const TOTAL_KICKS = 5;
+const GOAL = { left: 220, right: 580, top: 120, bottom: 260, pw: 12 };
+const BALL_HOME = { x: 400, y: 460 };
+
+// Wall of defenders
+const WALL = {
+  xs: [365, 400, 435],  // player center x positions (3 players)
+  fy: 395,              // feet y
+  hitTop: 330,
+  hitBot: 396,
+  hitLeft: 350,
+  hitRight: 450
+};
+
+// Pre-generate crowd (avoid per-frame random flicker)
+const crowd = Array.from({ length: 110 }, () => ({
+  x: Math.random() * W,
+  y: 60 + Math.random() * 55,
+  r: 6 + Math.random() * 7,
+  color: `hsl(${Math.random() * 360},55%,${28 + Math.random() * 28}%)`
+}));
+
+// ── State ──────────────────────────────────────────────────
+let state = 'intro'; // intro | aiming | shooting | result | gameover
+let score = 0, kickCount = 0;
+let mx = 400, my = 190;
+
+// Power
+let charging = false, power = 0, chargeStart = 0;
+const MAX_CHARGE = 1500;
+
+// Ball
+let ball = { x: BALL_HOME.x, y: BALL_HOME.y, r: 14 };
+
+// Goalkeeper
+let gk = { x: 400, y: 195, tx: 400, ty: 195 };
+
+// Animation
+let anim = null; // { sx,sy,tx,ty,start,dur,done }
+
+// Result
+let resultMsg = '', resultType = '', resultTime = 0;
+
+// Particles
+let particles = [];
+
+// Wall flash on impact
+let wallFlash = 0;
+
+// Foul cutscene
+let foulAnim = null;
+
+// Audio
+let audioCtx = null;
+function getAudio() {
+  if (!audioCtx) {
+    const C = window.AudioContext || window.webkitAudioContext;
+    if (C) audioCtx = new C();
+  }
+  return audioCtx;
+}
+
+function playWhistle() {
+  const ac = getAudio();
+  if (!ac) return;
+  if (ac.state === 'suspended') ac.resume();
+
+  function blast(when, dur) {
+    const osc  = ac.createOscillator();
+    const gain = ac.createGain();
+    const lfo  = ac.createOscillator();
+    const lfog = ac.createGain();
+
+    // Slight vibrato via LFO
+    lfo.frequency.value = 10;
+    lfog.gain.value = 22;
+    lfo.connect(lfog);
+    lfog.connect(osc.frequency);
+
+    osc.connect(gain);
+    gain.connect(ac.destination);
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(2750, when);
+    osc.frequency.linearRampToValueAtTime(3100, when + 0.03);
+    osc.frequency.linearRampToValueAtTime(2930, when + dur * 0.85);
+
+    gain.gain.setValueAtTime(0, when);
+    gain.gain.linearRampToValueAtTime(0.26, when + 0.012);
+    gain.gain.setValueAtTime(0.26, when + dur * 0.68);
+    gain.gain.linearRampToValueAtTime(0, when + dur);
+
+    osc.start(when); lfo.start(when);
+    osc.stop(when + dur + 0.01); lfo.stop(when + dur + 0.01);
+  }
+
+  // Two short blasts — classic referee whistle
+  blast(ac.currentTime,        0.22);
+  blast(ac.currentTime + 0.36, 0.22);
+}
+
+// ── Helpers ────────────────────────────────────────────────
+const rnd = (a, b) => a + Math.random() * (b - a);
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+const inGoal = (x, y) =>
+  x > GOAL.left + 5 && x < GOAL.right - 5 &&
+  y > GOAL.top + 5  && y < GOAL.bottom - 5;
+
+// ── Game Logic ─────────────────────────────────────────────
+function startGame() {
+  score = 0; kickCount = 0;
+  resultMsg = ''; resultType = '';
+  particles = [];
+  resetRound();
+  startFoul();
+}
+
+function resetRound() {
+  ball.x = BALL_HOME.x; ball.y = BALL_HOME.y; ball.r = 14;
+  anim = null;
+  gk.x = 400; gk.y = 195; gk.tx = 400; gk.ty = 195;
+  charging = false; power = 0;
+  wallFlash = 0;
+}
+
+function shoot(tx, ty) {
+  if (state !== 'aiming') return;
+  state = 'shooting';
+  const p = Math.max(20, power);
+  const dur = (1.5 - (p / 100) * 0.8) * 1000;
+
+  // Keeper AI: 65% chance of correct dive
+  if (Math.random() < 0.65) {
+    gk.tx = tx + rnd(-45, 45);
+    gk.ty = ty + rnd(-25, 25);
+  } else {
+    gk.tx = tx < 400 ? rnd(450, 570) : rnd(230, 350);
+    gk.ty = rnd(135, 245);
+  }
+
+  // Arc height: higher aim = higher arc (to clear the wall)
+  const arcHeight = 60 + Math.max(0, (GOAL.bottom - ty) / (GOAL.bottom - GOAL.top)) * 110;
+  // t when ball reaches wall's field depth: solve sy + (ty-sy)*t = WALL.fy
+  const t_wall = (WALL.fy - BALL_HOME.y) / (ty - BALL_HOME.y);
+  anim = { sx: ball.x, sy: ball.y, tx, ty, start: performance.now(), dur, done: false,
+           arcHeight, t_wall, wallChecked: false };
+}
+
+function resolveShot(tx, ty) {
+  kickCount++;
+  if (anim && anim.wallBlocked) {
+    resultType = 'wall';
+    resultMsg = pick(['壁に当たった！', '壁に阻まれた！', 'ブロック！', '壁を越えろ！']);
+    resultTime = performance.now();
+    state = 'result';
+    setTimeout(() => {
+      if (kickCount >= TOTAL_KICKS) {
+        state = 'gameover';
+      } else {
+        resetRound();
+        resultMsg = ''; resultType = '';
+        state = 'aiming';
+      }
+    }, 2200);
+    return;
+  }
+  if (!inGoal(tx, ty)) {
+    resultType = 'miss';
+    resultMsg = pick(['外れ！', '惜しい！', 'ゴールポストに当たった！', '大きく外れた！']);
+  } else {
+    const dx = gk.x - tx, dy = gk.y - ty;
+    if (Math.sqrt(dx * dx + dy * dy) < 48) {
+      resultType = 'save';
+      resultMsg = pick(['セーブ！', 'ナイスキーパー！', '止められた！', 'スーパーセーブ！']);
+    } else {
+      resultType = 'goal';
+      resultMsg = pick(['ゴーール！！', '決まった！', '完璧なシュート！', 'スーパーゴール！']);
+      score++;
+      spawnParticles(tx, ty);
+    }
+  }
+  resultTime = performance.now();
+  state = 'result';
+
+  setTimeout(() => {
+    if (kickCount >= TOTAL_KICKS) {
+      state = 'gameover';
+    } else {
+      resetRound();
+      resultMsg = ''; resultType = '';
+      state = 'aiming';
+    }
+  }, 2200);
+}
+
+function spawnParticles(x, y) {
+  for (let i = 0; i < 60; i++) {
+    particles.push({
+      x, y,
+      vx: rnd(-8, 8), vy: rnd(-10, -1),
+      life: 1, decay: rnd(0.014, 0.028),
+      r: rnd(4, 10),
+      color: `hsl(${rnd(0, 360)},90%,60%)`
+    });
+  }
+}
+
+function spawnImpactParticles(x, y) {
+  for (let i = 0; i < 28; i++) {
+    particles.push({
+      x, y,
+      vx: rnd(-6, 6), vy: rnd(-7, 3),
+      life: 1, decay: rnd(0.035, 0.06),
+      r: rnd(3, 8),
+      color: `hsl(${rnd(20, 45)},95%,62%)`
+    });
+  }
+}
+
+// ── Foul Cutscene ──────────────────────────────────────────
+function startFoul() {
+  foulAnim = { start: performance.now(), dur: 3400 };
+  state = 'foul';
+}
+
+// Player figure drawn with feet at (0,0)
+function drawCutFigure(jersey, hair, pose) {
+  // Legs
+  ctx.fillStyle = '#1a237e';
+  if (pose === 'run') {
+    ctx.fillRect(-12, 0, 9, 22);
+    ctx.save(); ctx.translate(4, 10); ctx.rotate(0.45);
+    ctx.fillRect(0, 0, 9, 18); ctx.restore();
+  } else {
+    ctx.fillRect(-12, 0, 9, 27); ctx.fillRect(2, 0, 9, 27);
+  }
+  // Shoes
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.ellipse(-7, 27, 10, 4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(7, 27, 10, 4, 0, 0, Math.PI * 2); ctx.fill();
+  // Body
+  ctx.fillStyle = jersey;
+  roundRect(-14, -36, 28, 40, 4); ctx.fill();
+  // Arms
+  ctx.fillStyle = jersey;
+  if (pose === 'run') {
+    ctx.save(); ctx.translate(-16, -30); ctx.rotate(-0.5);
+    ctx.fillRect(-10, 0, 10, 8); ctx.restore();
+    ctx.save(); ctx.translate(14, -30); ctx.rotate(0.5);
+    ctx.fillRect(0, 0, 10, 8); ctx.restore();
+  } else {
+    ctx.fillRect(-23, -30, 11, 8); ctx.fillRect(12, -30, 11, 8);
+  }
+  // Neck
+  ctx.fillStyle = '#ffb74d';
+  ctx.fillRect(-5, -40, 10, 6);
+  // Head
+  ctx.fillStyle = '#ffb74d';
+  ctx.beginPath(); ctx.arc(0, -50, 14, 0, Math.PI * 2); ctx.fill();
+  // Hair
+  ctx.fillStyle = hair;
+  ctx.beginPath(); ctx.arc(0, -57, 13, Math.PI, 0); ctx.fill();
+  // Shocked eyes
+  if (pose === 'shocked') {
+    ctx.fillStyle = 'white';
+    ctx.beginPath(); ctx.arc(-5, -51, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(5, -51, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.beginPath(); ctx.arc(-5, -51, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(5, -51, 2, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+// Referee figure drawn with feet at (0,0)
+function drawCutReferee(armRaise) {
+  ctx.fillStyle = '#212121';
+  ctx.fillRect(-10, 0, 8, 25); ctx.fillRect(2, 0, 8, 25);
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.ellipse(-6, 25, 9, 4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(6, 25, 9, 4, 0, 0, Math.PI * 2); ctx.fill();
+  // Body
+  ctx.fillStyle = '#212121';
+  roundRect(-12, -33, 24, 37, 4); ctx.fill();
+  // Left arm (whistle side)
+  ctx.fillStyle = '#212121';
+  ctx.fillRect(-22, -27, 11, 7);
+  // Right arm raised (free kick signal)
+  ctx.save(); ctx.translate(12, -27); ctx.rotate(-armRaise * Math.PI * 0.55);
+  ctx.fillStyle = '#212121'; ctx.fillRect(0, 0, 11, 7); ctx.restore();
+  // Whistle
+  if (armRaise > 0.35) {
+    ctx.fillStyle = '#f9a825';
+    ctx.beginPath(); ctx.arc(-22, -26, 5, 0, Math.PI * 2); ctx.fill();
+    const wA = Math.min((armRaise - 0.35) / 0.35, 1);
+    for (let i = 0; i < 3; i++) {
+      ctx.strokeStyle = `rgba(255,250,100,${wA * (0.8 - i * 0.22)})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(-22, -26, 9 + i * 7, -0.9, 0.5); ctx.stroke();
+    }
+  }
+  // Neck
+  ctx.fillStyle = '#d4a373'; ctx.fillRect(-5, -37, 10, 6);
+  // Head
+  ctx.fillStyle = '#d4a373';
+  ctx.beginPath(); ctx.arc(0, -47, 13, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#9e9e9e';
+  ctx.beginPath(); ctx.arc(0, -53, 12, Math.PI, 0); ctx.fill();
+}
+
+function drawFoulScene(now) {
+  const t  = Math.min((now - foulAnim.start) / foulAnim.dur, 1);
+  const ez = x => x < 0.5 ? 2*x*x : 1 - Math.pow(-2*x+2,2)/2;
+
+  const pApp  = ez(Math.min(t / 0.26, 1));                         // approach
+  const pHit  = Math.max(0, Math.min((t - 0.26) / 0.10, 1));      // collision
+  const pFall = Math.max(0, Math.min((t - 0.36) / 0.22, 1));      // fall
+  const pRef  = Math.max(0, Math.min((t - 0.58) / 0.22, 1));      // referee in
+  const pFoul = Math.max(0, Math.min((t - 0.80) / 0.10, 1));      // "ファウル！"
+  const pFK   = Math.max(0, Math.min((t - 0.90) / 0.10, 1));      // "フリーキック！"
+
+  const CY = 400; // feet level
+
+  // Attacker: left → center
+  const attX = 210 + pApp * 160;
+  // Defender: right → center
+  const defX = 600 - pApp * 150;
+
+  // ── Ball ──
+  {
+    const flyT = Math.max(0, (pHit - 0.2) / 0.8);
+    const bx = attX + 22 + flyT * 90;
+    const by = CY - 14 - flyT * 55 + flyT * flyT * 38;
+    const br = 11 * (1 - flyT * 0.45);
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
+    ctx.beginPath(); ctx.ellipse(bx, CY, br * 0.8, 3, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'white';
+    ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#222';
+    ctx.beginPath(); ctx.arc(bx, by, br * 0.32, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.beginPath(); ctx.arc(bx - br*0.27, by - br*0.27, br*0.2, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // ── Defender (red) ──
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath(); ctx.ellipse(defX, CY + 4, 18, 5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.save();
+  ctx.translate(defX, CY);
+  if (pHit > 0) { ctx.rotate(-0.15 - pHit * 0.25); ctx.translate(0, pHit * 8); }
+  drawCutFigure('#c62828', '#1a0000', pHit < 0.1 ? 'run' : 'stand');
+  ctx.restore();
+
+  // ── Attacker (blue) ──
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath(); ctx.ellipse(attX, CY + 4, 18, 5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.save();
+  ctx.translate(attX, CY);
+  if (pFall > 0) { ctx.rotate(pFall * Math.PI * 0.48); ctx.translate(0, pFall * 12); }
+  const attPose = pFall > 0 ? 'shocked' : pHit > 0.5 ? 'shocked' : 'run';
+  drawCutFigure('#1565c0', '#212121', attPose);
+  ctx.restore();
+
+  // ── Impact stars ──
+  if (pHit > 0 && pHit < 0.95) {
+    const icx = (attX + defX) / 2, icy = CY - 35;
+    const ia  = pHit < 0.45 ? pHit / 0.45 : 1 - (pHit - 0.45) / 0.5;
+    ctx.save(); ctx.globalAlpha = ia;
+    ctx.fillStyle = 'rgba(255,200,0,0.28)';
+    ctx.beginPath(); ctx.arc(icx, icy, 38, 0, Math.PI * 2); ctx.fill();
+    for (let i = 0; i < 7; i++) {
+      const a  = (i / 7) * Math.PI * 2 + pHit * 1.5;
+      const d  = 18 + pHit * 28;
+      const sr = 4 - pHit * 2.5;
+      ctx.fillStyle = i % 2 === 0 ? '#ffd700' : '#ff5722';
+      ctx.beginPath(); ctx.arc(icx + Math.cos(a)*d, icy + Math.sin(a)*d*0.65, Math.max(0.5, sr), 0, Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // ── Referee ──
+  if (pRef > 0) {
+    const refX = 90 + pRef * 115;
+    ctx.fillStyle = 'rgba(0,0,0,0.15)';
+    ctx.beginPath(); ctx.ellipse(refX, CY + 3, 15, 4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.save(); ctx.translate(refX, CY); drawCutReferee(pRef); ctx.restore();
+  }
+
+  // ── Whistle sound (once, when referee raises arm enough) ──
+  if (pRef >= 0.32 && !foulAnim.whistlePlayed) {
+    foulAnim.whistlePlayed = true;
+    playWhistle();
+  }
+
+  // ── "ファウル！" text ──
+  if (pFoul > 0) {
+    const a = pFoul < 0.3 ? pFoul / 0.3 : pFoul > 0.8 ? (1 - pFoul) / 0.2 : 1;
+    const s = pFoul < 0.15 ? 0.5 + pFoul / 0.15 * 0.6 : 1.0;
+    ctx.save(); ctx.globalAlpha = a; ctx.translate(W/2, 195); ctx.scale(s, s);
+    ctx.font = 'bold 64px Arial'; ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillText('ファウル！', 2, 2);
+    ctx.fillStyle = '#ff5722';       ctx.fillText('ファウル！', 0, 0);
+    ctx.restore();
+  }
+
+  // ── "フリーキック！" text ──
+  if (pFK > 0) {
+    const a = pFK < 0.3 ? pFK / 0.3 : 1;
+    const s = pFK < 0.2 ? 0.5 + pFK / 0.2 * 0.6 : 1.05;
+    ctx.save(); ctx.globalAlpha = a; ctx.translate(W/2, 258); ctx.scale(s, s);
+    ctx.font = 'bold 52px Arial'; ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(0,0,0,0.7)'; ctx.fillText('フリーキック！', 2, 2);
+    ctx.fillStyle = '#ffd700';        ctx.fillText('フリーキック！', 0, 0);
+    ctx.restore();
+  }
+
+  // Skip hint
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.font = '13px Arial'; ctx.textAlign = 'right';
+  ctx.fillText('クリックでスキップ', W - 16, H - 14);
+}
+
+// ── Update ─────────────────────────────────────────────────
+function update(now) {
+  // Foul cutscene timing
+  if (state === 'foul' && foulAnim) {
+    if (now - foulAnim.start >= foulAnim.dur) { foulAnim = null; state = 'aiming'; }
+    return;
+  }
+
+  if (charging && state === 'aiming')
+    power = Math.min(((now - chargeStart) / MAX_CHARGE) * 100, 100);
+
+  if (anim && !anim.done) {
+    const t = Math.min((now - anim.start) / anim.dur, 1);
+    ball.x = anim.sx + (anim.tx - anim.sx) * t;
+    ball.y = anim.sy + (anim.ty - anim.sy) * t - anim.arcHeight * Math.sin(Math.PI * t);
+    ball.r = 14 - 7 * t;
+
+    // Keeper reacts after 28% of animation
+    if (t > 0.28) {
+      const kt = Math.min((t - 0.28) / 0.72 * 1.8, 1);
+      gk.x = 400 + (gk.tx - 400) * kt;
+      gk.y = 195 + (gk.ty - 195) * kt;
+    }
+    // Wall check: when ball reaches the wall's field depth, test if arc clears the wall
+    if (!anim.wallChecked && t >= anim.t_wall) {
+      anim.wallChecked = true;
+      const bx  = anim.sx + (anim.tx - anim.sx) * anim.t_wall;
+      const liftAtWall = anim.arcHeight * Math.sin(Math.PI * anim.t_wall);
+      const ballScreenY = WALL.fy - liftAtWall;      // wall head top ≈ WALL.fy - 74
+      if (bx >= WALL.hitLeft && bx <= WALL.hitRight && ballScreenY > WALL.fy - 74) {
+        anim.wallBlocked = true;
+        anim.done = true;
+        wallFlash = 16;
+        ball.x = bx; ball.y = ballScreenY;
+        spawnImpactParticles(bx, ballScreenY);
+        resolveShot(anim.tx, anim.ty);
+      }
+    }
+    if (!anim.wallBlocked && t >= 1) {
+      anim.done = true;
+      resolveShot(anim.tx, anim.ty);
+    }
+  }
+
+  if (wallFlash > 0) wallFlash--;
+
+  particles = particles.filter(p => p.life > 0);
+  particles.forEach(p => {
+    p.x += p.vx; p.y += p.vy;
+    p.vy += 0.3;
+    p.life -= p.decay;
+  });
+}
+
+// ── Draw helpers ───────────────────────────────────────────
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ── Draw functions ─────────────────────────────────────────
+function drawBg() {
+  // Sky
+  const sky = ctx.createLinearGradient(0, 0, 0, 280);
+  sky.addColorStop(0, '#050d1f');
+  sky.addColorStop(1, '#0d3060');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, 280);
+
+  // Stadium lights glow
+  [[90, 25], [710, 25]].forEach(([lx, ly]) => {
+    const g = ctx.createRadialGradient(lx, ly, 0, lx, ly, 180);
+    g.addColorStop(0, 'rgba(255,255,220,0.12)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, 280);
+    ctx.fillStyle = '#ffffcc';
+    ctx.beginPath();
+    ctx.arc(lx, ly, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#888';
+    ctx.fillRect(lx - 12, ly, 24, 8);
+  });
+
+  // Crowd
+  crowd.forEach(c => {
+    ctx.fillStyle = c.color;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Stand shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(0, 108, W, 35);
+
+  // Field
+  const field = ctx.createLinearGradient(0, 270, 0, H);
+  field.addColorStop(0, '#2a7a2a');
+  field.addColorStop(0.5, '#1e5c1e');
+  field.addColorStop(1, '#183c18');
+  ctx.fillStyle = field;
+  ctx.fillRect(0, 270, W, H - 270);
+
+  // Field stripes
+  for (let i = 0; i < 6; i++) {
+    const y1 = 270 + i * (H - 270) / 6;
+    const h2 = (H - 270) / 12;
+    ctx.fillStyle = 'rgba(0,0,0,0.06)';
+    ctx.fillRect(0, y1, W, h2);
+  }
+
+  // Free kick arc
+  ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(400, 460, 100, Math.PI, 0);
+  ctx.stroke();
+
+  // Goal area box line
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(282, 266, 236, 14);
+
+  // Kick spot
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.beginPath();
+  ctx.arc(400, 460, 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawGoal() {
+  const G = GOAL;
+
+  // Net background
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.fillRect(G.left + G.pw, G.top, G.right - G.left - G.pw * 2, G.bottom - G.top);
+
+  // Net lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+  ctx.lineWidth = 1;
+  for (let x = G.left + G.pw; x <= G.right - G.pw; x += 20) {
+    ctx.beginPath(); ctx.moveTo(x, G.top); ctx.lineTo(x, G.bottom); ctx.stroke();
+  }
+  for (let y = G.top; y <= G.bottom; y += 20) {
+    ctx.beginPath(); ctx.moveTo(G.left + G.pw, y); ctx.lineTo(G.right - G.pw, y); ctx.stroke();
+  }
+
+  // Posts
+  ctx.fillStyle = '#f0f0f0';
+  ctx.fillRect(G.left - G.pw / 2, G.top - G.pw / 2, G.pw, G.bottom - G.top + G.pw / 2);
+  ctx.fillRect(G.right - G.pw / 2, G.top - G.pw / 2, G.pw, G.bottom - G.top + G.pw / 2);
+  ctx.fillRect(G.left - G.pw / 2, G.top - G.pw / 2, G.right - G.left + G.pw, G.pw);
+
+  // Post shadows
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.fillRect(G.left + G.pw / 2 + 2, G.top + G.pw / 2, 4, G.bottom - G.top);
+  ctx.fillRect(G.right + G.pw / 2 - 2, G.top + G.pw / 2, 4, G.bottom - G.top);
+}
+
+function drawGK() {
+  const x = gk.x, y = gk.y;
+  ctx.save();
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.beginPath();
+  ctx.ellipse(x, y + 52, 26, 7, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Legs
+  ctx.fillStyle = '#283593';
+  ctx.fillRect(x - 19, y + 15, 15, 35);
+  ctx.fillRect(x + 4, y + 15, 15, 35);
+
+  // Shoes
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.ellipse(x - 11, y + 52, 13, 6, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(x + 11, y + 52, 13, 6, 0, 0, Math.PI * 2); ctx.fill();
+
+  // Body (yellow keeper jersey)
+  ctx.fillStyle = '#f9a825';
+  roundRect(x - 23, y - 38, 46, 56, 6);
+  ctx.fill();
+
+  // Jersey number
+  ctx.fillStyle = '#333';
+  ctx.font = 'bold 16px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('1', x, y + 2);
+
+  // Arms
+  ctx.fillStyle = '#f9a825';
+  ctx.fillRect(x - 37, y - 33, 17, 12);
+  ctx.fillRect(x + 20, y - 33, 17, 12);
+
+  // Gloves
+  ctx.fillStyle = '#d32f2f';
+  ctx.beginPath(); ctx.arc(x - 37, y - 27, 11, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 37, y - 27, 11, 0, Math.PI * 2); ctx.fill();
+
+  // Neck
+  ctx.fillStyle = '#ffb74d';
+  ctx.fillRect(x - 9, y - 53, 18, 17);
+
+  // Head
+  ctx.fillStyle = '#ffb74d';
+  ctx.beginPath(); ctx.arc(x, y - 63, 21, 0, Math.PI * 2); ctx.fill();
+
+  // Hair
+  ctx.fillStyle = '#4a2800';
+  ctx.beginPath(); ctx.arc(x, y - 71, 19, Math.PI, 0); ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = 'white';
+  ctx.beginPath(); ctx.arc(x - 7, y - 63, 4.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 7, y - 63, 4.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.arc(x - 6, y - 63, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 8, y - 63, 2.5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.restore();
+}
+
+function drawWall() {
+  const hairColors = ['#212121', '#5d4037', '#f57f17', '#37474f'];
+  WALL.xs.forEach((cx, i) => {
+    const by = WALL.fy;
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.22)';
+    ctx.beginPath();
+    ctx.ellipse(cx, by, 14, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Legs (dark green shorts)
+    ctx.fillStyle = '#1b5e20';
+    ctx.fillRect(cx - 10, by - 24, 9, 23);
+    ctx.fillRect(cx + 1,  by - 24, 9, 23);
+
+    // Shoes
+    ctx.fillStyle = '#111';
+    ctx.beginPath(); ctx.ellipse(cx - 7, by - 2, 11, 5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx + 7, by - 2, 11, 5, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Body (blue away jersey)
+    ctx.fillStyle = '#1565c0';
+    roundRect(cx - 12, by - 52, 24, 30, 3);
+    ctx.fill();
+
+    // Arms raised (wall formation)
+    ctx.fillStyle = '#1565c0';
+    ctx.fillRect(cx - 20, by - 62, 9, 14);
+    ctx.fillRect(cx + 11, by - 62, 9, 14);
+
+    // Hands
+    ctx.fillStyle = '#ffb74d';
+    ctx.beginPath(); ctx.arc(cx - 19, by - 63, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + 19, by - 63, 6, 0, Math.PI * 2); ctx.fill();
+
+    // Neck
+    ctx.fillStyle = '#ffb74d';
+    ctx.fillRect(cx - 5, by - 56, 10, 6);
+
+    // Head
+    ctx.fillStyle = '#ffb74d';
+    ctx.beginPath(); ctx.arc(cx, by - 63, 11, 0, Math.PI * 2); ctx.fill();
+
+    // Hair
+    ctx.fillStyle = hairColors[i];
+    ctx.beginPath(); ctx.arc(cx, by - 68, 10, Math.PI, 0); ctx.fill();
+  });
+
+  // Impact flash
+  if (wallFlash > 0) {
+    ctx.fillStyle = `rgba(255,170,0,${(wallFlash / 16) * 0.55})`;
+    ctx.fillRect(WALL.hitLeft - 4, WALL.hitTop - 4,
+                 WALL.hitRight - WALL.hitLeft + 8,
+                 WALL.hitBot   - WALL.hitTop  + 8);
+  }
+}
+
+function drawBall() {
+  const b = ball;
+  const rise = Math.max(0, BALL_HOME.y - b.y);
+  const riseFrac = rise / (BALL_HOME.y - 100);
+
+  // Ground shadow (fades as ball rises)
+  ctx.fillStyle = `rgba(0,0,0,${0.28 * (1 - riseFrac * 0.75)})`;
+  ctx.beginPath();
+  ctx.ellipse(b.x, BALL_HOME.y, b.r * (1 - riseFrac * 0.5), 5 * (1 - riseFrac * 0.5), 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Ball body
+  ctx.fillStyle = 'white';
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
+
+  // Center patch
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.3, 0, Math.PI * 2); ctx.fill();
+
+  // Side patches
+  [0, 1.257, 2.513, 3.770, 5.026].forEach(a => {
+    ctx.beginPath();
+    ctx.arc(b.x + Math.cos(a) * b.r * 0.52, b.y + Math.sin(a) * b.r * 0.52, b.r * 0.19, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Highlight
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.beginPath(); ctx.arc(b.x - b.r * 0.27, b.y - b.r * 0.27, b.r * 0.21, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawAim() {
+  if (state !== 'aiming') return;
+  const inG = inGoal(mx, my);
+
+  // Trajectory arc
+  ctx.save();
+  ctx.setLineDash([10, 7]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(ball.x, ball.y);
+  const previewArc = 60 + Math.max(0, (GOAL.bottom - my) / (GOAL.bottom - GOAL.top)) * 110;
+  ctx.quadraticCurveTo((ball.x + mx) / 2, Math.min(my, ball.y) - previewArc * 0.9, mx, my);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Crosshair
+  const r = 18;
+  ctx.strokeStyle = inG ? 'rgba(255,55,55,0.92)' : 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(mx, my, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(mx - r - 9, my); ctx.lineTo(mx - r + 4, my);
+  ctx.moveTo(mx + r - 4, my); ctx.lineTo(mx + r + 9, my);
+  ctx.moveTo(mx, my - r - 9); ctx.lineTo(mx, my - r + 4);
+  ctx.moveTo(mx, my + r - 4); ctx.lineTo(mx, my + r + 9);
+  ctx.stroke();
+
+  ctx.fillStyle = inG ? 'rgba(255,55,55,0.9)' : 'rgba(255,255,255,0.7)';
+  ctx.beginPath(); ctx.arc(mx, my, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawPowerBar() {
+  if (!charging) return;
+  const bx = W - 78, by = 285, bw = 26, bh = 155;
+
+  // Panel
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  roundRect(bx - 14, by - 28, bw + 28, bh + 52, 10);
+  ctx.fill();
+
+  // Label
+  ctx.fillStyle = '#aaa';
+  ctx.font = 'bold 11px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('POWER', bx + bw / 2, by - 12);
+
+  // Bar bg
+  ctx.fillStyle = '#333';
+  ctx.fillRect(bx, by, bw, bh);
+
+  // Fill
+  const p = power / 100;
+  if (p > 0) {
+    const grad = ctx.createLinearGradient(0, by + bh, 0, by);
+    grad.addColorStop(0, '#27ae60');
+    grad.addColorStop(0.55, '#f39c12');
+    grad.addColorStop(1, '#e74c3c');
+    ctx.fillStyle = grad;
+    ctx.fillRect(bx, by + bh * (1 - p), bw, bh * p);
+  }
+
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 13px Arial';
+  ctx.fillText(Math.round(power) + '%', bx + bw / 2, by + bh + 17);
+}
+
+function drawHUD() {
+  // Score panel
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  roundRect(15, 15, 198, 78, 10);
+  ctx.fill();
+
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 20px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText(`⚽ ${score} ゴール`, 30, 42);
+
+  ctx.fillStyle = '#ccc';
+  ctx.font = '15px Arial';
+  ctx.fillText(`${kickCount} / ${TOTAL_KICKS} キック`, 30, 65);
+
+  // Kick dots
+  for (let i = 0; i < TOTAL_KICKS; i++) {
+    ctx.fillStyle = i < kickCount ? '#e53935' : 'rgba(255,255,255,0.25)';
+    ctx.beginPath(); ctx.arc(30 + i * 25, 81, 7, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Restart button (top-right)
+  const rbx = W - 172, rby = 15, rbw = 157, rbh = 30;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  roundRect(rbx, rby, rbw, rbh, 6);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth = 1;
+  roundRect(rbx, rby, rbw, rbh, 6);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.font = '13px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('↩ 最初からやりなおす', rbx + rbw / 2, rby + 20);
+
+  // Instruction bar
+  if (state === 'aiming') {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    roundRect(W / 2 - 175, H - 38, 350, 28, 14);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.72)';
+    ctx.font = '13px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(
+      charging ? 'マウスを離してシュート！' : '壁を越えてゴールを狙え！ クリック＆ホールド でパワーをためる',
+      W / 2, H - 19
+    );
+  }
+}
+
+function drawResultMsg() {
+  if (!resultMsg) return;
+  const age = (performance.now() - resultTime) / 1000;
+  if (age > 2.2) return;
+  const alpha = age < 1.8 ? 1 : 1 - (age - 1.8) / 0.4;
+  const scale = age < 0.18 ? age / 0.18 * 1.1 : age < 0.38 ? 1.1 - (age - 0.18) / 0.2 * 0.1 : 1;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(W / 2, H / 2 - 40);
+  ctx.scale(scale, scale);
+
+  const color = resultType === 'goal' ? '#ffd700'
+              : resultType === 'save' ? '#ef5350'
+              : resultType === 'wall' ? '#ff9800'
+              : '#9e9e9e';
+  ctx.font = 'bold 54px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillText(resultMsg, 2, 2);
+  ctx.fillStyle = color;
+  ctx.fillText(resultMsg, 0, 0);
+  ctx.restore();
+}
+
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.save();
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  });
+}
+
+function drawIntro() {
+  ctx.fillStyle = 'rgba(0,5,20,0.87)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 22;
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 50px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('⚽ フリーキック対決', W / 2, 145);
+  ctx.restore();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.font = '21px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${TOTAL_KICKS}本のフリーキックで何点取れる？`, W / 2, 208);
+
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  roundRect(W / 2 - 195, 240, 390, 148, 12);
+  ctx.fill();
+
+  const instrs = [
+    '🖱️  マウスでゴールを狙う',
+    '🔴  クリック＆ホールドでパワーをためる',
+    '⚡  離してシュート！（タイミングが大事）'
+  ];
+  instrs.forEach((t, i) => {
+    ctx.fillStyle = 'rgba(255,255,255,0.82)';
+    ctx.font = '17px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText(t, W / 2 - 165, 278 + i * 38);
+  });
+
+  const blink = Math.floor(performance.now() / 580) % 2 === 0;
+  ctx.fillStyle = blink ? '#ffd700' : '#cc9900';
+  roundRect(W / 2 - 115, 420, 230, 50, 25);
+  ctx.fill();
+  ctx.fillStyle = '#111';
+  ctx.font = 'bold 21px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('クリックしてスタート', W / 2, 452);
+}
+
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(0,5,20,0.9)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.shadowColor = '#ffd700'; ctx.shadowBlur = 22;
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 46px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('試合終了！', W / 2, 125);
+  ctx.restore();
+
+  const stars = Math.round((score / TOTAL_KICKS) * 5);
+  ctx.font = '42px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd700';
+  ctx.fillText('★'.repeat(stars) + '☆'.repeat(5 - stars), W / 2, 195);
+
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 36px Arial';
+  ctx.fillText(`${score} / ${TOTAL_KICKS}  ゴール`, W / 2, 268);
+
+  const comments = [
+    'もっと練習が必要！', 'まずまずです。', 'よくできました！',
+    'なかなかやるね！', '素晴らしい！', '完璧！FKの神！'
+  ];
+  ctx.fillStyle = '#aaa';
+  ctx.font = '22px Arial';
+  ctx.fillText(comments[score], W / 2, 325);
+
+  const blink = Math.floor(performance.now() / 580) % 2 === 0;
+  ctx.fillStyle = blink ? '#2ecc71' : '#27ae60';
+  roundRect(W / 2 - 115, 380, 230, 50, 25);
+  ctx.fill();
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 21px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('↩ 最初からやりなおす', W / 2, 412);
+}
+
+// ── Main Loop ──────────────────────────────────────────────
+function loop(now) {
+  update(now);
+  ctx.clearRect(0, 0, W, H);
+
+  drawBg();
+  drawGoal();
+  drawGK();
+
+  if (state !== 'foul') {
+    drawWall();
+    drawBall();
+    drawParticles();
+  }
+
+  if (state === 'aiming' || state === 'shooting' || state === 'result') {
+    drawAim();
+    drawPowerBar();
+    drawHUD();
+    drawResultMsg();
+  }
+  if (state === 'foul')     { drawFoulScene(now); drawHUD(); }
+  if (state === 'intro')    drawIntro();
+  if (state === 'gameover') drawGameOver();
+
+  requestAnimationFrame(loop);
+}
+
+// ── Events ─────────────────────────────────────────────────
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  mx = (e.clientX - r.left) * (W / r.width);
+  my = (e.clientY - r.top)  * (H / r.height);
+});
+
+canvas.addEventListener('mousedown', () => {
+  // Unlock / resume AudioContext on first user gesture
+  const ac = getAudio();
+  if (ac && ac.state === 'suspended') ac.resume();
+
+  if (state === 'intro' || state === 'gameover') { startGame(); return; }
+  if (state === 'foul') { foulAnim = null; state = 'aiming'; return; } // skip foul
+
+  // "最初からやりなおす" button click (matches drawHUD button area)
+  if (state !== 'intro' && state !== 'gameover') {
+    if (mx >= W - 172 && mx <= W - 15 && my >= 15 && my <= 45) {
+      startGame(); return;
+    }
+  }
+
+  if (state !== 'aiming') return;
+  charging = true;
+  chargeStart = performance.now();
+  power = 0;
+});
+
+canvas.addEventListener('mouseup', () => {
+  if (!charging) return;
+  charging = false;
+  if (state === 'aiming') shoot(mx, my);
+  power = 0;
+});
+
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
