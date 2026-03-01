@@ -27,9 +27,24 @@
       height: auto;
       touch-action: none;
     }
+    .back-btn {
+      position: fixed;
+      top: 12px; left: 12px;
+      padding: 7px 16px;
+      background: rgba(0,0,0,0.5);
+      color: rgba(255,255,255,0.8);
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 20px;
+      text-decoration: none;
+      font-size: 0.82rem; font-weight: 600;
+      transition: background 0.15s, color 0.15s;
+      z-index: 100;
+    }
+    .back-btn:hover { background: rgba(0,0,0,0.75); color: #fff; }
   </style>
 </head>
 <body>
+<a class="back-btn" href="index.html">← タイトルへ</a>
 <canvas id="c"></canvas>
 <script>
 const canvas = document.getElementById('c');
